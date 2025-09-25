@@ -1,0 +1,36 @@
+name: pr
+
+on:
+  push:
+    branches:
+      - rewrite/go
+  pull_request:
+    branches:
+      - rewrite/go
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        goos: [linux, darwin, windows]
+        goarch: [amd64]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: 1.23
+
+      - name: Test
+        run: |
+          go test -v
+
+
+      - name: Build
+        run: |
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o cody-${{ matrix.goos }}-${{ matrix.goarch }} main.go
