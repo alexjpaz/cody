@@ -36,3 +36,24 @@ jobs:
         with:
           name: cody-${{ matrix.goos }}-${{ matrix.goarch }}
           path: cody-${{ matrix.goos }}-${{ matrix.goarch }}
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release ${{ github.ref }}
+          draft: false
+          prerelease: false
+
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: cody-${{ matrix.goos }}-${{ matrix.goarch }}
+          asset_name: cody-${{ matrix.goos }}-${{ matrix.goarch }}
+          asset_content_type: application/octet-stream
