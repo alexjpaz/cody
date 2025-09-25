@@ -1,12 +1,9 @@
 name: release
 
-# on:
-#   push:
-#     branches:
-#       - rewrite/go
-#   pull_request:
-#     branches:
-#       - rewrite/go
+on:
+  push:
+    branches:
+      - main
 
 jobs:
   build:
@@ -25,6 +22,10 @@ jobs:
         uses: actions/setup-go@v4
         with:
           go-version: 1.23
+
+      - name: Test
+        run: |
+          go test -v
 
       - name: Build
         run: |
