@@ -3,10 +3,10 @@ name: pr
 on:
   push:
     branches:
-      - rewrite/go
+      - master
   pull_request:
     branches:
-      - rewrite/go
+      - master
 
 jobs:
   build:
@@ -29,7 +29,6 @@ jobs:
       - name: Test
         run: |
           go test -v
-
 
       - name: Build
         run: |
