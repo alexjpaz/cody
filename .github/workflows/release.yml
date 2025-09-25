@@ -11,8 +11,6 @@ permissions:
 jobs:
   create-release:
     runs-on: ubuntu-latest
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
       - name: Create Release
         env:
@@ -50,11 +48,9 @@ jobs:
           GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o cody-${{ matrix.goos }}-${{ matrix.goarch }} main.go
 
       - name: Upload Release Asset
-        uses: actions/upload-release-asset@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: cody-${{ matrix.goos }}-${{ matrix.goarch }}
-          asset_name: cody-${{ matrix.goos }}-${{ matrix.goarch }}
-          asset_content_type: application/octet-stream
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload ${{ github.ref_name }} \
+            cody-${{ matrix.goos }}-${{ matrix.goarch }} \
+            --repo ${{ github.repository }}
