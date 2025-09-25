@@ -42,10 +42,19 @@ var pullCmd = &cobra.Command{
 	RunE:  runPull,
 }
 
+var openCmd = &cobra.Command{
+	Use:   "open [filter]",
+	Short: "Change directory to the repository",
+	Long:  "Run git commands for opening changes from a remote repository",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runOpen,
+}
+
 func init() {
 	rootCmd.AddCommand(searchCmd)
 	rootCmd.AddCommand(addCmd)
 	rootCmd.AddCommand(pullCmd)
+	rootCmd.AddCommand(openCmd)
 }
 
 func main() {
@@ -132,6 +141,30 @@ func runPull(cmd *cobra.Command, args []string) error {
 			fmt.Printf("failed to clone repository %s\n", url)
 		}
 	}
+
+	return nil
+}
+
+func runOpen(cmd *cobra.Command, args []string) error {
+	filter := args[0]
+	urls, _ := collectAllCodyEntries()
+
+	// find all matching urls
+	var matches []string
+	for _, url := range urls {
+		if strings.Contains(url, filter) {
+			matches = append(matches, url)
+		}
+	}
+
+	if len(matches) > 1 {
+		return fmt.Errorf("multiple matches found for filter '%s': %v", filter, matches)
+	} else if len(matches) == 0 {
+		return fmt.Errorf("no matches found for filter '%s'", filter)
+	}
+
+	dest := resolveCodyWorkspaceUrl(matches[0])
+	fmt.Printf("cd %s\n", dest)
 
 	return nil
 }
