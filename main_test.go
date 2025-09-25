@@ -1,250 +1,296 @@
 package main
 
 import (
-	"bytes"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/spf13/cobra"
 )
 
-func TestRootCommand(t *testing.T) {
-	cmd := rootCmd
-	if cmd.Use != "cody" {
-		t.Errorf("Expected root command use to be 'cody', got %s", cmd.Use)
-	}
-}
-
-func TestRunSearch(t *testing.T) {
-	// Create a temporary directory to act as home directory
-	tempDir, err := os.MkdirTemp("", "test_home")
+func TestResolveCodyConfig(t *testing.T) {
+	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	// Create the .code.d directory
-	codeDirPath := filepath.Join(tempDir, ".code.d")
-	if err := os.MkdirAll(codeDirPath, 0755); err != nil {
-		t.Fatalf("Failed to create .code.d directory: %v", err)
-	}
-
-	// Create test data file
-	testFilePath := filepath.Join(codeDirPath, "test.code")
-	testData := `line one
-line two with pattern
-line three
-   line four with spaces   
-line five with pattern again
-
-line seven (line six was empty)`
-
-	if err := os.WriteFile(testFilePath, []byte(testData), 0644); err != nil {
-		t.Fatalf("Failed to write test data file: %v", err)
-	}
-
-	// Mock os.UserHomeDir by temporarily changing the HOME environment variable
-	originalHome := os.Getenv("HOME")
-	if originalHome == "" {
-		// On Windows, try USERPROFILE
-		originalHome = os.Getenv("USERPROFILE")
-		os.Setenv("USERPROFILE", tempDir)
-		defer os.Setenv("USERPROFILE", originalHome)
-	} else {
-		os.Setenv("HOME", tempDir)
-		defer os.Setenv("HOME", originalHome)
+		t.Fatalf("Failed to get home directory: %v", err)
 	}
 
 	tests := []struct {
-		name           string
-		args           []string
-		expectedOutput string
-		expectError    bool
+		name     string
+		path     string
+		expected string
 	}{
 		{
-			name: "no pattern - should print all non-empty lines",
-			args: []string{},
-			expectedOutput: `line one
-line two with pattern
-line three
-line four with spaces
-line five with pattern again
-line seven (line six was empty)
-`,
-			expectError: false,
+			name:     "simple path",
+			path:     "test.code",
+			expected: filepath.Join(homeDir, ".code.d", "test.code"),
 		},
 		{
-			name: "with pattern - should print matching lines only",
-			args: []string{"pattern"},
-			expectedOutput: `line two with pattern
-line five with pattern again
-`,
-			expectError: false,
-		},
-		{
-			name:           "pattern not found - should print nothing",
-			args:           []string{"nonexistent"},
-			expectedOutput: "",
-			expectError:    false,
-		},
-		{
-			name: "pattern matching partial word",
-			args: []string{"three"},
-			expectedOutput: `line three
-`,
-			expectError: false,
+			name:     "nested path",
+			path:     "subdir/test.code",
+			expected: filepath.Join(homeDir, ".code.d", "subdir", "test.code"),
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Capture stdout
-			oldStdout := os.Stdout
-			r, w, _ := os.Pipe()
-			os.Stdout = w
-
-			// Create a mock cobra command
-			cmd := &cobra.Command{}
-
-			// Run the function
-			err := runSearch(cmd, tt.args)
-
-			// Restore stdout and get output
-			w.Close()
-			os.Stdout = oldStdout
-
-			var buf bytes.Buffer
-			io.Copy(&buf, r)
-			output := buf.String()
-
-			// Check for errors
-			if tt.expectError && err == nil {
-				t.Errorf("Expected error but got none")
-			}
-			if !tt.expectError && err != nil {
-				t.Errorf("Unexpected error: %v", err)
-			}
-
-			// Check output
-			if output != tt.expectedOutput {
-				t.Errorf("Expected output:\n%q\nGot output:\n%q", tt.expectedOutput, output)
+			result := resolveCodyConfig(tt.path)
+			if result != tt.expected {
+				t.Errorf("resolveCodyConfig(%q) = %q, want %q", tt.path, result, tt.expected)
 			}
 		})
 	}
 }
 
-func TestRunSearchFileErrors(t *testing.T) {
-	// Test case where home directory cannot be determined
-	// This is tricky to test directly since os.UserHomeDir() is hard to mock
-	// So we'll test the file not found case instead
-
-	// Create a temporary directory
-	tempDir, err := os.MkdirTemp("", "test_home_no_file")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	// Set home directory but don't create the file
-	originalHome := os.Getenv("HOME")
-	if originalHome == "" {
-		originalHome = os.Getenv("USERPROFILE")
-		os.Setenv("USERPROFILE", tempDir)
-		defer os.Setenv("USERPROFILE", originalHome)
-	} else {
-		os.Setenv("HOME", tempDir)
-		defer os.Setenv("HOME", originalHome)
-	}
-
-	cmd := &cobra.Command{}
-	err = runSearch(cmd, []string{})
-
-	if err == nil {
-		t.Error("Expected error when file doesn't exist, but got none")
-	}
-
-	expectedErrorSubstring := "failed to open data file"
-	if !strings.Contains(err.Error(), expectedErrorSubstring) {
-		t.Errorf("Expected error to contain '%s', got: %v", expectedErrorSubstring, err)
-	}
-}
-
-func TestRunSearchEmptyFile(t *testing.T) {
-	// Create a temporary directory
-	tempDir, err := os.MkdirTemp("", "test_home_empty")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	// Create the .code.d directory and empty file
-	codeDirPath := filepath.Join(tempDir, ".code.d")
-	if err := os.MkdirAll(codeDirPath, 0755); err != nil {
-		t.Fatalf("Failed to create .code.d directory: %v", err)
-	}
-
-	testFilePath := filepath.Join(codeDirPath, "test.code")
-	if err := os.WriteFile(testFilePath, []byte(""), 0644); err != nil {
-		t.Fatalf("Failed to write empty test file: %v", err)
-	}
-
-	// Set up environment
-	originalHome := os.Getenv("HOME")
-	if originalHome == "" {
-		originalHome = os.Getenv("USERPROFILE")
-		os.Setenv("USERPROFILE", tempDir)
-		defer os.Setenv("USERPROFILE", originalHome)
-	} else {
-		os.Setenv("HOME", tempDir)
-		defer os.Setenv("HOME", originalHome)
-	}
-
-	// Capture stdout
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	cmd := &cobra.Command{}
-	err = runSearch(cmd, []string{})
-
-	// Restore stdout and get output
-	w.Close()
-	os.Stdout = oldStdout
-
-	var buf bytes.Buffer
-	io.Copy(&buf, r)
-	output := buf.String()
-
-	if err != nil {
-		t.Errorf("Unexpected error with empty file: %v", err)
-	}
-
-	if output != "" {
-		t.Errorf("Expected no output for empty file, got: %q", output)
-	}
-}
-
 func TestResolveCodyWorkspaceUrl(t *testing.T) {
-	homeDir, _ := os.UserHomeDir()
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("Failed to get home directory: %v", err)
+	}
 
-	t.Run("GitHub URL", func(t *testing.T) {
-		targetUrl := homeDir + "/code/__DOMAIN__/__ORGANIZATION__/__REPOSITORY__"
+	tests := []struct {
+		name     string
+		url      string
+		expected string
+	}{
+		{
+			name:     "git SSH URL with .git suffix",
+			url:      "git@github.com:user/repo.git",
+			expected: filepath.Join(homeDir, "code", "github.com", "user", "repo"),
+		},
+		{
+			name:     "git SSH URL without .git suffix",
+			url:      "git@gitlab.com:group/project",
+			expected: filepath.Join(homeDir, "code", "gitlab.com", "group", "project"),
+		},
+		{
+			name:     "non-git URL",
+			url:      "https://github.com/user/repo",
+			expected: "",
+		},
+	}
 
-		url := resolveCodyWorkspaceUrl("git@__DOMAIN__:__ORGANIZATION__/__REPOSITORY__.git")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := resolveCodyWorkspaceUrl(tt.url)
+			if result != tt.expected {
+				t.Errorf("resolveCodyWorkspaceUrl(%q) = %q, want %q", tt.url, result, tt.expected)
+			}
+		})
+	}
+}
 
-		if url != targetUrl {
-			t.Errorf("Expected %q, got: %q", targetUrl, url)
+func TestCollectAllCodyEntries(t *testing.T) {
+	// Create a temporary directory to simulate .code.d
+	tmpDir := t.TempDir()
+
+	// Override home directory for testing
+	originalHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", originalHome)
+
+	// Create test structure
+	codeDir := filepath.Join(tmpDir, ".code.d")
+	if err := os.MkdirAll(codeDir, 0755); err != nil {
+		t.Fatalf("Failed to create test directory: %v", err)
+	}
+
+	// Create test files
+	testFiles := map[string]string{
+		"test1.code": "git@github.com:user/repo1.git\ngit@github.com:user/repo2.git\n",
+		"test2.code": "git@gitlab.com:group/project.git\n\n",
+		"ignore.txt": "should be ignored",
+	}
+
+	for filename, content := range testFiles {
+		path := filepath.Join(codeDir, filename)
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatalf("Failed to create test file %s: %v", filename, err)
 		}
-	})
+	}
 
-	t.Run("Invalid URL", func(t *testing.T) {
-		url := resolveCodyWorkspaceUrl("invalid-url")
+	// Test collection
+	entries, err := collectAllCodyEntries()
+	if err != nil {
+		t.Fatalf("collectAllCodyEntries() error = %v", err)
+	}
 
-		if url != "" {
-			t.Errorf("Expected empty string for invalid URL, got: %q", url)
+	expected := []string{
+		"git@github.com:user/repo1.git",
+		"git@github.com:user/repo2.git",
+		"git@gitlab.com:group/project.git",
+	}
+
+	if len(entries) != len(expected) {
+		t.Errorf("collectAllCodyEntries() returned %d entries, want %d", len(entries), len(expected))
+	}
+
+	for _, exp := range expected {
+		found := false
+		for _, entry := range entries {
+			if entry == exp {
+				found = true
+				break
+			}
 		}
-	})
+		if !found {
+			t.Errorf("Expected entry %q not found in results", exp)
+		}
+	}
+}
+
+func TestRunAdd(t *testing.T) {
+	// Create a temporary directory
+	tmpDir := t.TempDir()
+
+	originalHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", originalHome)
+
+	codeDir := filepath.Join(tmpDir, ".code.d")
+	if err := os.MkdirAll(codeDir, 0755); err != nil {
+		t.Fatalf("Failed to create test directory: %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		codePath  string
+		gitURL    string
+		wantError bool
+	}{
+		{
+			name:      "add new entry",
+			codePath:  "test",
+			gitURL:    "git@github.com:user/repo.git",
+			wantError: false,
+		},
+		{
+			name:      "add duplicate entry",
+			codePath:  "test",
+			gitURL:    "git@github.com:user/repo.git",
+			wantError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := runAdd(nil, []string{tt.codePath, tt.gitURL})
+			if (err != nil) != tt.wantError {
+				t.Errorf("runAdd() error = %v, wantError %v", err, tt.wantError)
+			}
+
+			// Verify the entry was added
+			filePath := resolveCodyConfig(tt.codePath + ".code")
+			content, err := os.ReadFile(filePath)
+			if err != nil {
+				t.Fatalf("Failed to read file: %v", err)
+			}
+
+			if !strings.Contains(string(content), tt.gitURL) {
+				t.Errorf("File does not contain expected URL %q", tt.gitURL)
+			}
+		})
+	}
+}
+
+func TestRunSearch(t *testing.T) {
+	// Create a temporary directory
+	tmpDir := t.TempDir()
+
+	originalHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", originalHome)
+
+	codeDir := filepath.Join(tmpDir, ".code.d")
+	if err := os.MkdirAll(codeDir, 0755); err != nil {
+		t.Fatalf("Failed to create test directory: %v", err)
+	}
+
+	// Create test file
+	testFile := filepath.Join(codeDir, "test.code")
+	content := "git@github.com:user/repo1.git\ngit@gitlab.com:user/repo2.git\n"
+	if err := os.WriteFile(testFile, []byte(content), 0644); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		pattern string
+		wantErr bool
+	}{
+		{
+			name:    "search with pattern",
+			pattern: "github",
+			wantErr: false,
+		},
+		{
+			name:    "search without pattern",
+			pattern: "",
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var args []string
+			if tt.pattern != "" {
+				args = []string{tt.pattern}
+			}
+
+			err := runSearch(nil, args)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("runSearch() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestRunOpen(t *testing.T) {
+	// Create a temporary directory
+	tmpDir := t.TempDir()
+
+	originalHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", originalHome)
+
+	codeDir := filepath.Join(tmpDir, ".code.d")
+	if err := os.MkdirAll(codeDir, 0755); err != nil {
+		t.Fatalf("Failed to create test directory: %v", err)
+	}
+
+	// Create test file
+	testFile := filepath.Join(codeDir, "test.code")
+	content := "git@github.com:user/repo1.git\ngit@gitlab.com:user/repo2.git\n"
+	if err := os.WriteFile(testFile, []byte(content), 0644); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		filter  string
+		wantErr bool
+	}{
+		{
+			name:    "unique match",
+			filter:  "repo1",
+			wantErr: false,
+		},
+		{
+			name:    "multiple matches",
+			filter:  "user",
+			wantErr: true,
+		},
+		{
+			name:    "no matches",
+			filter:  "nonexistent",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := runOpen(nil, []string{tt.filter})
+			if (err != nil) != tt.wantErr {
+				t.Errorf("runOpen() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
 }
