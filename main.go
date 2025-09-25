@@ -44,11 +44,7 @@ func main() {
 }
 
 func runSearch(cmd *cobra.Command, args []string) error {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("failed to get user home directory: %w", err)
-	}
-	var filePath = homeDir + "/.code.d/test.code"
+	var filePath = resolveCodyConfig("test.code")
 
 	var pattern string
 
@@ -94,11 +90,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	codePath := args[0]
 	gitURL := args[1]
 
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("failed to get user home directory: %w", err)
-	}
-	var filePath = homeDir + "/.code.d/" + codePath + ".code"
+	var filePath = resolveCodyConfig(codePath + ".code")
 
 	file, err := os.OpenFile(filePath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
 	if err != nil {
@@ -113,4 +105,32 @@ func runAdd(cmd *cobra.Command, args []string) error {
 
 	fmt.Println("Entry added successfully.")
 	return nil
+}
+
+func resolveCodyConfig(path string) string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return homeDir + "/.code.d/" + path
+
+}
+
+func resolveCodyWorkspaceUrl(url string) string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+
+	if strings.HasPrefix(url, "git@") {
+		parts := strings.SplitN(url, ":", 2)
+		if len(parts) == 2 {
+			domain := strings.TrimPrefix(parts[0], "git@")
+			path := parts[1]
+			target := homeDir + "/code/" + domain + "/" + strings.TrimSuffix(path, ".git")
+			return target
+		}
+	}
+
+	return ""
 }
