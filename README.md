@@ -1,7 +1,7 @@
 # cody
 > Code repository management
 
-# What is Cody?
+### What is Cody?
 
 **Cody** is a command line utilitity program that helps get various git projects organized and easy to find. The `code.d` directory in your home folder contains the git urls and acts as an index for your projects.
 
