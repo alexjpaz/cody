@@ -18,9 +18,9 @@ Cody can then run various tasks for these repositories
 
 ### Installation
 
-```
-go install github.com/alexjpaz/cody@latest
-```
+Download the [latest release binary](https://github.com/alexjpaz/cody/releases) for your OS.
+
+Copy the binary to a directory in your `$PATH` (e.g. /usr/local/bin)
 
 You will need to add some git repo urls to the `~/.code.d` directory.
 
