@@ -59,7 +59,6 @@ func init() {
 
 func main() {
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -135,11 +134,12 @@ func runPull(cmd *cobra.Command, args []string) error {
 	for _, url := range urls {
 		dest := resolveCodyWorkspaceUrl(url)
 
-		fmt.Println("Cloning ", url, " to ", dest)
-
 		if _, _, err := executeShellCommand("git", "clone", url, dest); err != nil {
-			fmt.Printf("failed to clone repository %s\n", url)
+			fmt.Printf("Clone failed: %s\n", url)
+		} else {
+			fmt.Println("Clone success: ", url, " to ", dest)
 		}
+
 	}
 
 	return nil
@@ -158,7 +158,7 @@ func runOpen(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(matches) > 1 {
-		return fmt.Errorf("multiple matches found for filter '%s': %v", filter, matches)
+		return fmt.Errorf("multiple matches found: \n%s", strings.Join(matches, "\n"))
 	} else if len(matches) == 0 {
 		return fmt.Errorf("no matches found for filter '%s'", filter)
 	}
