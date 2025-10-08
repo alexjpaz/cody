@@ -1,0 +1,31 @@
+[?25l[?2004hPick an item (Enter prints & exits)
+
+filter> t
+
+  alpha
+  bravo
+  charlie
+  delta
+  echo
+  foxtrot
+  golf
+[11A
+
+filter> f 
+
+  foxtrot
+  golf
+[J[6A
+
+filter> fo 
+
+
+[J[5A
+
+filter> foe 
+
+[J[4A
+
+filter> foej 
+
+[4A [J[2K[?2004l[?25h[?1002l[?1003l[?1006l
