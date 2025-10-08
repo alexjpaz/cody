@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
+	"github.com/alexjpaz/cody/picker"
 	"github.com/spf13/cobra"
 )
 
@@ -47,6 +49,13 @@ var openCmd = &cobra.Command{
 	Short: "Change directory to the repository",
 	Long:  "Run git commands for opening changes from a remote repository",
 	Args:  cobra.ExactArgs(1),
+	RunE:  runOpen,
+}
+
+var openCmd = &cobra.Command{
+	Use:   "picker [filter]",
+	Short: "Change directory to the repository",
+	Long:  "Run git commands for opening changes from a remote repository",
 	RunE:  runOpen,
 }
 
@@ -167,6 +176,15 @@ func runOpen(cmd *cobra.Command, args []string) error {
 	fmt.Printf("cd %s\n", dest)
 
 	return nil
+}
+
+func runPicker(cmd *cobra.Command, args []string) error {
+	choice, err := picker.Run()
+	if err != nil {
+		log.Fatal(err)
+	}
+	// Print the selected line to stdout
+	fmt.Println(choice)
 }
 
 func resolveCodyConfig(path string) string {
