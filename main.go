@@ -127,6 +127,14 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// ANSI color codes
+const (
+	colorReset = "\033[0m"
+	colorGray  = "\033[90m"
+	colorBlue  = "\033[34m"
+	colorRed   = "\033[31m"
+)
+
 func runPull(cmd *cobra.Command, args []string) error {
 	// filter := args[0]
 	urls, _ := collectAllCodyEntries()
@@ -134,12 +142,24 @@ func runPull(cmd *cobra.Command, args []string) error {
 	for _, url := range urls {
 		dest := resolveCodyWorkspaceUrl(url)
 
-		if _, _, err := executeShellCommand("git", "clone", url, dest); err != nil {
-			fmt.Printf("Clone failed: %s\n", url)
-		} else {
-			fmt.Println("Clone success: ", url, " to ", dest)
+		if dest == "" {
+			fmt.Printf("%sSkipped (unsupported URL format): %s%s\n", colorGray, url, colorReset)
+			continue
 		}
 
+		// Check if .git directory exists (fast local check)
+		gitDir := filepath.Join(dest, ".git")
+		if info, err := os.Stat(gitDir); err == nil && info.IsDir() {
+			fmt.Printf("%sSkipped (already exists): %s%s\n", colorGray, url, colorReset)
+			continue
+		}
+
+		fmt.Printf("%sCloning: %s%s\n", colorBlue, url, colorReset)
+		if _, _, err := executeShellCommand("git", "clone", url, dest); err != nil {
+			fmt.Printf("%sClone failed: %s%s\n", colorRed, url, colorReset)
+		} else {
+			fmt.Printf("%sClone success: %s to %s%s\n", colorBlue, url, dest, colorReset)
+		}
 	}
 
 	return nil
