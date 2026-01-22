@@ -50,11 +50,24 @@ var openCmd = &cobra.Command{
 	RunE:  runOpen,
 }
 
+var rmCmd = &cobra.Command{
+	Use:   "rm [url]",
+	Short: "Remove a code entry",
+	Long:  "Remove a code entry matching the given URL from the cody files",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runRm,
+}
+
+var rmForce bool
+
 func init() {
 	rootCmd.AddCommand(searchCmd)
 	rootCmd.AddCommand(addCmd)
 	rootCmd.AddCommand(pullCmd)
 	rootCmd.AddCommand(openCmd)
+	rootCmd.AddCommand(rmCmd)
+
+	rmCmd.Flags().BoolVarP(&rmForce, "force", "f", false, "Remove without confirmation")
 }
 
 func main() {
@@ -185,6 +198,82 @@ func runOpen(cmd *cobra.Command, args []string) error {
 
 	dest := resolveCodyWorkspaceUrl(matches[0])
 	fmt.Printf("cd %s\n", dest)
+
+	return nil
+}
+
+func runRm(cmd *cobra.Command, args []string) error {
+	urlToRemove := args[0]
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+
+	codeDir := filepath.Join(homeDir, ".code.d")
+	found := false
+
+	err = filepath.Walk(codeDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if !info.IsDir() && filepath.Ext(path) == ".code" {
+			content, err := os.ReadFile(path)
+			if err != nil {
+				return fmt.Errorf("failed to read file %s: %w", path, err)
+			}
+
+			var newLines []string
+			var matchedLines []string
+			scanner := bufio.NewScanner(strings.NewReader(string(content)))
+			for scanner.Scan() {
+				line := strings.TrimSpace(scanner.Text())
+				if line != "" {
+					if strings.Contains(line, urlToRemove) {
+						matchedLines = append(matchedLines, line)
+						found = true
+					} else {
+						newLines = append(newLines, line)
+					}
+				}
+			}
+
+			for _, matchedLine := range matchedLines {
+				if !rmForce {
+					fmt.Printf("Remove %s from %s? [y/N] ", matchedLine, path)
+					reader := bufio.NewReader(os.Stdin)
+					response, _ := reader.ReadString('\n')
+					response = strings.TrimSpace(strings.ToLower(response))
+					if response != "y" && response != "yes" {
+						fmt.Println("Skipped")
+						newLines = append(newLines, matchedLine)
+						continue
+					}
+				}
+				fmt.Printf("Removed %s from %s\n", matchedLine, path)
+			}
+
+			if len(matchedLines) > 0 {
+				newContent := strings.Join(newLines, "\n")
+				if len(newLines) > 0 {
+					newContent += "\n"
+				}
+				if err := os.WriteFile(path, []byte(newContent), 0644); err != nil {
+					return fmt.Errorf("failed to write file %s: %w", path, err)
+				}
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		return err
+	}
+
+	if !found {
+		fmt.Printf("Entry not found: %s\n", urlToRemove)
+	}
 
 	return nil
 }
