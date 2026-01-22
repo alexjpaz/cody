@@ -40,6 +40,9 @@ jobs:
       matrix:
         goos: [linux, darwin, windows]
         goarch: [amd64]
+        include:
+          - goos: darwin
+            goarch: arm64
 
     steps:
       - name: Checkout
