@@ -57,6 +57,5 @@ In order to get the benefit of some features in cody you will need to copy the f
 ```
 function cody_cd() {
     eval $(cody open $@)
-    cd $(cat /tmp/cody_result)
 }
 ```
