@@ -172,7 +172,7 @@ func TestRunAdd(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := runAdd(nil, []string{tt.codePath, tt.gitURL})
+			err := runAdd(nil, []string{tt.gitURL, tt.codePath})
 			if (err != nil) != tt.wantError {
 				t.Errorf("runAdd() error = %v, wantError %v", err, tt.wantError)
 			}
