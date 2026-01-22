@@ -18,14 +18,30 @@ Cody can then run various tasks for these repositories
 
 ### Installation
 
+#### Quick Install (Recommended)
+
+```bash
+curl -sL https://github.com/alexjpaz/cody/releases/latest/download/install.sh | bash
+```
+
+#### Manual Install
+
 Download the [latest release binary](https://github.com/alexjpaz/cody/releases) for your OS.
 
 Copy the binary to a directory in your `$PATH` (e.g. /usr/local/bin)
 
+#### Using Go
+
+```bash
+go install github.com/alexjpaz/cody@latest
+```
+
+#### Setup
+
 You will need to add some git repo urls to the `~/.code.d` directory.
 
 ```
-mkdir -o ~/.code.d/
+mkdir -p ~/.code.d/
 echo "git@github.com:alexjpaz/cody.git" >> ~/.code.d/github.code
 ```
 

@@ -12,6 +12,9 @@ jobs:
   create-release:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
       - name: Create Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -20,6 +23,14 @@ jobs:
             --repo ${{ github.repository }} \
             --title "Release ${{ github.ref_name }}" \
             --generate-notes || true
+
+      - name: Upload install script
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload ${{ github.ref_name }} \
+            install.sh \
+            --repo ${{ github.repository }}
 
   build:
     needs: create-release
