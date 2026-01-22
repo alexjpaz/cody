@@ -27,10 +27,10 @@ var searchCmd = &cobra.Command{
 }
 
 var addCmd = &cobra.Command{
-	Use:   "add [code_path] [git_url]",
+	Use:   "add [git_url] [code_path]",
 	Short: "Add a new code entry",
-	Long:  "Add a new code entry to the cody files",
-	Args:  cobra.ExactArgs(2),
+	Long:  "Add a new code entry to the cody files. If code_path is omitted, defaults to 'uncategorized'.",
+	Args:  cobra.RangeArgs(1, 2),
 	RunE:  runAdd,
 }
 
@@ -104,8 +104,11 @@ func runSearch(cmd *cobra.Command, args []string) error {
 }
 
 func runAdd(cmd *cobra.Command, args []string) error {
-	codePath := args[0]
-	gitURL := args[1]
+	gitURL := args[0]
+	codePath := "uncategorized"
+	if len(args) > 1 {
+		codePath = args[1]
+	}
 
 	var filePath = resolveCodyConfig(codePath + ".code")
 
