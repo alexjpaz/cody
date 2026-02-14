@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -67,7 +68,50 @@ var shellIntegrationCmd = &cobra.Command{
 	Run:   runShellIntegration,
 }
 
-var rmForce bool
+var aliasCmd = &cobra.Command{
+	Use:   "alias [name] [url-pattern]",
+	Short: "Manage aliases for code entries",
+	Long:  "Add, list, or remove aliases for code entries. Use --list to list all, --rm to remove.",
+	Args:  cobra.RangeArgs(0, 2),
+	RunE:  runAlias,
+}
+
+var tagCmd = &cobra.Command{
+	Use:   "tag [tag] [url-pattern]",
+	Short: "Manage tags for code entries",
+	Long:  "Add, list, or remove tags for code entries. Use --list to list all, --rm to remove.",
+	Args:  cobra.RangeArgs(0, 2),
+	RunE:  runTag,
+}
+
+var syncCmd = &cobra.Command{
+	Use:   "sync",
+	Short: "Bidirectional sync between code.d index and code workspace",
+	Long:  "Discover repos in ~/code not tracked in .code.d and clone repos in .code.d not yet in ~/code.",
+	RunE:  runSync,
+}
+
+var migrateCmd = &cobra.Command{
+	Use:   "migrate",
+	Short: "Migrate repos from legacy paths to new namespaced paths",
+	Long:  "Move repos from ~/code/{host}/{owner}/{repo} to ~/code/{codePath}/{host}/{owner}/{repo}.",
+	RunE:  runMigrate,
+}
+
+var (
+	aliasList  bool
+	aliasRm    string
+	tagList    bool
+	tagRm      string
+	syncDry    bool
+	migrateDry bool
+)
+
+var (
+	rmForce   bool
+	addAlias  string
+	addTags   string
+)
 
 func init() {
 	rootCmd.AddCommand(searchCmd)
@@ -76,8 +120,20 @@ func init() {
 	rootCmd.AddCommand(openCmd)
 	rootCmd.AddCommand(rmCmd)
 	rootCmd.AddCommand(shellIntegrationCmd)
+	rootCmd.AddCommand(aliasCmd)
+	rootCmd.AddCommand(tagCmd)
+	rootCmd.AddCommand(syncCmd)
+	rootCmd.AddCommand(migrateCmd)
 
 	rmCmd.Flags().BoolVarP(&rmForce, "force", "f", false, "Remove without confirmation")
+	addCmd.Flags().StringVar(&addAlias, "alias", "", "Comma-separated aliases for the entry")
+	addCmd.Flags().StringVar(&addTags, "tags", "", "Comma-separated tags for the entry")
+	aliasCmd.Flags().BoolVar(&aliasList, "list", false, "List all entries with aliases")
+	aliasCmd.Flags().StringVar(&aliasRm, "rm", "", "Remove an alias by name")
+	tagCmd.Flags().BoolVar(&tagList, "list", false, "List all tags")
+	tagCmd.Flags().StringVar(&tagRm, "rm", "", "Remove a tag")
+	syncCmd.Flags().BoolVar(&syncDry, "dry-run", false, "Print what would be done without making changes")
+	migrateCmd.Flags().BoolVar(&migrateDry, "dry-run", false, "Print what would be moved without making changes")
 }
 
 func main() {
@@ -104,7 +160,7 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	}
 
 	for _, entry := range entries {
-		if pattern == "" || strings.Contains(entry.url, pattern) {
+		if pattern == "" || entryMatches(entry, pattern) {
 			dest := resolveCodyWorkspaceUrl(entry, pathTmpl)
 			if dest != "" {
 				fmt.Println(dest)
@@ -130,7 +186,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create directory %s: %w", filepath.Dir(filePath), err)
 	}
 
-	// Check if entry already exists
+	// Check if entry already exists (compare by URL only)
 	if _, err := os.Stat(filePath); err == nil {
 		content, err := os.ReadFile(filePath)
 		if err != nil {
@@ -139,11 +195,24 @@ func runAdd(cmd *cobra.Command, args []string) error {
 
 		lines := strings.Split(string(content), "\n")
 		for _, line := range lines {
-			if strings.TrimSpace(line) == gitURL {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			parsed := parseCodyLine(line)
+			if parsed.url == gitURL {
 				fmt.Printf("Entry already exists in %s\n", filePath)
 				return nil
 			}
 		}
+	}
+
+	newEntry := codyEntry{url: gitURL}
+	if addAlias != "" {
+		newEntry.aliases = strings.Split(addAlias, ",")
+	}
+	if addTags != "" {
+		newEntry.tags = strings.Split(addTags, ",")
 	}
 
 	file, err := os.OpenFile(filePath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
@@ -152,8 +221,8 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	}
 	defer file.Close()
 
-	entry := fmt.Sprintf("%s\n", gitURL)
-	if _, err := file.WriteString(entry); err != nil {
+	line := formatCodyLine(newEntry) + "\n"
+	if _, err := file.WriteString(line); err != nil {
 		return fmt.Errorf("failed to write to data file: %w", err)
 	}
 
@@ -216,22 +285,39 @@ func runOpen(cmd *cobra.Command, args []string) error {
 	// find all matching entries
 	var matches []codyEntry
 	for _, entry := range entries {
-		if strings.Contains(entry.url, filter) {
+		if entryMatches(entry, filter) {
 			matches = append(matches, entry)
 		}
 	}
 
-	if len(matches) > 1 {
-		urls := make([]string, len(matches))
-		for i, m := range matches {
-			urls[i] = m.url
-		}
-		return fmt.Errorf("multiple matches found: \n%s", strings.Join(urls, "\n"))
-	} else if len(matches) == 0 {
+	if len(matches) == 0 {
 		return fmt.Errorf("no matches found for filter '%s'", filter)
 	}
 
-	dest := resolveCodyWorkspaceUrl(matches[0], pathTmpl)
+	selected := matches[0]
+	if len(matches) > 1 {
+		// Interactive select: prompts go to stderr, only cd goes to stdout
+		fmt.Fprintf(os.Stderr, "Multiple matches found:\n")
+		for i, m := range matches {
+			dest := resolveCodyWorkspaceUrl(m, pathTmpl)
+			if dest == "" {
+				dest = m.url
+			}
+			fmt.Fprintf(os.Stderr, "  %d) %s\n", i+1, dest)
+		}
+		fmt.Fprintf(os.Stderr, "Select [1-%d]: ", len(matches))
+
+		reader := bufio.NewReader(os.Stdin)
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(input)
+		choice, err := strconv.Atoi(input)
+		if err != nil || choice < 1 || choice > len(matches) {
+			return fmt.Errorf("invalid selection: %s", input)
+		}
+		selected = matches[choice-1]
+	}
+
+	dest := resolveCodyWorkspaceUrl(selected, pathTmpl)
 	fmt.Printf("cd %s\n", dest)
 
 	return nil
@@ -244,6 +330,449 @@ func runShellIntegration(cmd *cobra.Command, args []string) {
 
 alias c=cody_cd
 `)
+}
+
+// updateEntryInFile finds an entry by URL pattern, applies a transform, and rewrites the file.
+func updateEntryInFile(urlPattern string, transform func(*codyEntry) bool) error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+
+	codeDir := filepath.Join(homeDir, ".code.d")
+	if _, err := os.Stat(codeDir); os.IsNotExist(err) {
+		return fmt.Errorf("no .code.d directory found")
+	}
+
+	found := false
+	err = filepath.Walk(codeDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() || filepath.Ext(path) != ".code" {
+			return nil
+		}
+
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+
+		var newLines []string
+		changed := false
+		scanner := bufio.NewScanner(strings.NewReader(string(content)))
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+			entry := parseCodyLine(line)
+			if strings.Contains(entry.url, urlPattern) {
+				if transform(&entry) {
+					changed = true
+					found = true
+				}
+				newLines = append(newLines, formatCodyLine(entry))
+			} else {
+				newLines = append(newLines, line)
+			}
+		}
+
+		if changed {
+			newContent := strings.Join(newLines, "\n")
+			if len(newLines) > 0 {
+				newContent += "\n"
+			}
+			return os.WriteFile(path, []byte(newContent), 0644)
+		}
+		return nil
+	})
+
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("no entry found matching '%s'", urlPattern)
+	}
+	return nil
+}
+
+func runAlias(cmd *cobra.Command, args []string) error {
+	if aliasList {
+		entries, err := collectAllCodyEntries()
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			if len(e.aliases) > 0 {
+				fmt.Printf("%s  alias=%s\n", e.url, strings.Join(e.aliases, ","))
+			}
+		}
+		return nil
+	}
+
+	if aliasRm != "" {
+		// Find entry with this alias and remove it
+		entries, err := collectAllCodyEntries()
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			for _, a := range e.aliases {
+				if a == aliasRm {
+					return updateEntryInFile(e.url, func(entry *codyEntry) bool {
+						var filtered []string
+						for _, ea := range entry.aliases {
+							if ea != aliasRm {
+								filtered = append(filtered, ea)
+							}
+						}
+						entry.aliases = filtered
+						return true
+					})
+				}
+			}
+		}
+		return fmt.Errorf("alias '%s' not found", aliasRm)
+	}
+
+	if len(args) < 2 {
+		return fmt.Errorf("usage: cody alias <name> <url-pattern>")
+	}
+
+	name, pattern := args[0], args[1]
+	return updateEntryInFile(pattern, func(entry *codyEntry) bool {
+		for _, a := range entry.aliases {
+			if a == name {
+				return false // already exists
+			}
+		}
+		entry.aliases = append(entry.aliases, name)
+		return true
+	})
+}
+
+func runTag(cmd *cobra.Command, args []string) error {
+	if tagList {
+		entries, err := collectAllCodyEntries()
+		if err != nil {
+			return err
+		}
+		seen := map[string]bool{}
+		for _, e := range entries {
+			for _, t := range e.tags {
+				if !seen[t] {
+					fmt.Println(t)
+					seen[t] = true
+				}
+			}
+		}
+		return nil
+	}
+
+	if tagRm != "" {
+		// If a pattern is given, remove tag from that entry; otherwise remove from all
+		var pattern string
+		if len(args) > 0 {
+			pattern = args[0]
+		}
+
+		entries, err := collectAllCodyEntries()
+		if err != nil {
+			return err
+		}
+
+		found := false
+		for _, e := range entries {
+			for _, t := range e.tags {
+				if t == tagRm {
+					if pattern != "" && !strings.Contains(e.url, pattern) {
+						continue
+					}
+					err := updateEntryInFile(e.url, func(entry *codyEntry) bool {
+						var filtered []string
+						for _, et := range entry.tags {
+							if et != tagRm {
+								filtered = append(filtered, et)
+							}
+						}
+						entry.tags = filtered
+						return true
+					})
+					if err != nil {
+						return err
+					}
+					found = true
+				}
+			}
+		}
+		if !found {
+			return fmt.Errorf("tag '%s' not found", tagRm)
+		}
+		return nil
+	}
+
+	if len(args) < 2 {
+		return fmt.Errorf("usage: cody tag <tag> <url-pattern>")
+	}
+
+	tag, pattern := args[0], args[1]
+	return updateEntryInFile(pattern, func(entry *codyEntry) bool {
+		for _, t := range entry.tags {
+			if t == tag {
+				return false
+			}
+		}
+		entry.tags = append(entry.tags, tag)
+		return true
+	})
+}
+
+type discoveredRepo struct {
+	path      string
+	remoteURL string
+}
+
+func discoverRepos(root string) ([]discoveredRepo, error) {
+	var repos []discoveredRepo
+
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // skip errors
+		}
+		if !info.IsDir() {
+			return nil
+		}
+		// Check for .git directory
+		gitDir := filepath.Join(path, ".git")
+		if gi, err := os.Stat(gitDir); err == nil && gi.IsDir() {
+			// Get remote URL
+			cmd := exec.Command("git", "-C", path, "remote", "get-url", "origin")
+			out, err := cmd.Output()
+			if err == nil {
+				url := strings.TrimSpace(string(out))
+				if url != "" {
+					repos = append(repos, discoveredRepo{path: path, remoteURL: url})
+				}
+			}
+			return filepath.SkipDir // don't descend into git repos
+		}
+		return nil
+	})
+	return repos, err
+}
+
+func reverseResolveCodePath(repoPath, homeDir, tmplStr string) string {
+	// For default template, strip ~/code/ prefix and use first segment
+	defaultPrefix := filepath.Join(homeDir, "code") + "/"
+	if strings.HasPrefix(repoPath, defaultPrefix) {
+		rel := strings.TrimPrefix(repoPath, defaultPrefix)
+		parts := strings.SplitN(rel, string(filepath.Separator), 2)
+		if len(parts) >= 1 {
+			// Check if the first segment looks like a host (contains a dot)
+			// If so, this is likely a legacy layout without codePath
+			if strings.Contains(parts[0], ".") {
+				return "uncategorized"
+			}
+			return parts[0]
+		}
+	}
+	return "uncategorized"
+}
+
+func runSync(cmd *cobra.Command, args []string) error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+	tmplStr := resolvePathTemplate(cfg)
+
+	pathTmpl, err := template.New("path").Parse(tmplStr)
+	if err != nil {
+		return fmt.Errorf("failed to parse path template: %w", err)
+	}
+
+	// Step 1: Discover untracked repos
+	codeRoot := filepath.Join(homeDir, "code")
+	if _, err := os.Stat(codeRoot); os.IsNotExist(err) {
+		fmt.Println("No ~/code directory found, skipping discovery")
+	} else {
+		existingEntries, err := collectAllCodyEntries()
+		if err != nil {
+			return fmt.Errorf("failed to collect entries: %w", err)
+		}
+
+		knownURLs := map[string]bool{}
+		for _, e := range existingEntries {
+			knownURLs[e.url] = true
+		}
+
+		discovered, err := discoverRepos(codeRoot)
+		if err != nil {
+			return fmt.Errorf("failed to discover repos: %w", err)
+		}
+
+		for _, repo := range discovered {
+			if knownURLs[repo.remoteURL] {
+				continue
+			}
+
+			codePath := reverseResolveCodePath(repo.path, homeDir, tmplStr)
+
+			if syncDry {
+				fmt.Printf("%s[dry-run] Would add: %s -> %s.code%s\n", colorBlue, repo.remoteURL, codePath, colorReset)
+			} else {
+				fmt.Printf("%sDiscovered: %s -> %s.code%s\n", colorBlue, repo.remoteURL, codePath, colorReset)
+				filePath := resolveCodyConfig(codePath + ".code")
+				if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+					return fmt.Errorf("failed to create directory: %w", err)
+				}
+				file, err := os.OpenFile(filePath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
+				if err != nil {
+					return fmt.Errorf("failed to open %s: %w", filePath, err)
+				}
+				fmt.Fprintf(file, "%s\n", repo.remoteURL)
+				file.Close()
+			}
+			knownURLs[repo.remoteURL] = true
+		}
+	}
+
+	// Step 2: Clone missing repos (reuse pull logic)
+	entries, err := collectAllCodyEntries()
+	if err != nil {
+		return fmt.Errorf("failed to collect entries: %w", err)
+	}
+
+	for _, entry := range entries {
+		dest := resolveCodyWorkspaceUrl(entry, pathTmpl)
+		if dest == "" {
+			continue
+		}
+
+		gitDir := filepath.Join(dest, ".git")
+		if info, err := os.Stat(gitDir); err == nil && info.IsDir() {
+			continue
+		}
+
+		if syncDry {
+			fmt.Printf("%s[dry-run] Would clone: %s -> %s%s\n", colorBlue, entry.url, dest, colorReset)
+		} else {
+			fmt.Printf("%sCloning: %s%s\n", colorBlue, entry.url, colorReset)
+			if _, _, err := executeShellCommand("git", "clone", entry.url, dest); err != nil {
+				fmt.Printf("%sClone failed: %s%s\n", colorRed, entry.url, colorReset)
+			} else {
+				fmt.Printf("%sClone success: %s to %s%s\n", colorBlue, entry.url, dest, colorReset)
+			}
+		}
+	}
+
+	return nil
+}
+
+func runMigrate(cmd *cobra.Command, args []string) error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+
+	legacyTmpl, err := template.New("legacy").Parse(pathShorthands["legacy"])
+	if err != nil {
+		return fmt.Errorf("failed to parse legacy template: %w", err)
+	}
+
+	defaultTmpl, err := template.New("default").Parse(pathShorthands["default"])
+	if err != nil {
+		return fmt.Errorf("failed to parse default template: %w", err)
+	}
+
+	entries, err := collectAllCodyEntries()
+	if err != nil {
+		return fmt.Errorf("failed to collect entries: %w", err)
+	}
+
+	moved := 0
+	for _, entry := range entries {
+		legacyPath := resolveCodyWorkspaceUrl(entry, legacyTmpl)
+		newPath := resolveCodyWorkspaceUrl(entry, defaultTmpl)
+
+		if legacyPath == "" || newPath == "" {
+			continue
+		}
+
+		// Skip if legacy and new resolve to the same path
+		if legacyPath == newPath {
+			continue
+		}
+
+		// Check if repo exists at legacy path
+		legacyGit := filepath.Join(legacyPath, ".git")
+		if _, err := os.Stat(legacyGit); err != nil {
+			continue
+		}
+
+		// Check if repo already exists at new path
+		newGit := filepath.Join(newPath, ".git")
+		if _, err := os.Stat(newGit); err == nil {
+			fmt.Printf("%sSkipped (already exists at new path): %s%s\n", colorGray, newPath, colorReset)
+			continue
+		}
+
+		if migrateDry {
+			fmt.Printf("[dry-run] %s -> %s\n", legacyPath, newPath)
+		} else {
+			if err := os.MkdirAll(filepath.Dir(newPath), 0755); err != nil {
+				fmt.Printf("%sFailed to create directory for %s: %v%s\n", colorRed, newPath, err, colorReset)
+				continue
+			}
+			if err := os.Rename(legacyPath, newPath); err != nil {
+				fmt.Printf("%sFailed to move %s -> %s: %v%s\n", colorRed, legacyPath, newPath, err, colorReset)
+				continue
+			}
+			fmt.Printf("%sMoved: %s -> %s%s\n", colorBlue, legacyPath, newPath, colorReset)
+		}
+		moved++
+	}
+
+	// Clean up empty directories left behind in ~/code
+	if !migrateDry && moved > 0 {
+		codeRoot := filepath.Join(homeDir, "code")
+		cleanEmptyDirs(codeRoot)
+	}
+
+	if moved == 0 {
+		fmt.Println("Nothing to migrate.")
+	} else if migrateDry {
+		fmt.Printf("\n%d repo(s) would be moved. Run without --dry-run to apply.\n", moved)
+	} else {
+		fmt.Printf("\n%d repo(s) migrated.\n", moved)
+	}
+
+	return nil
+}
+
+// cleanEmptyDirs removes empty directories bottom-up under root.
+func cleanEmptyDirs(root string) {
+	// Walk in reverse depth order by collecting dirs first
+	var dirs []string
+	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() && path != root {
+			dirs = append(dirs, path)
+		}
+		return nil
+	})
+	// Remove deepest first
+	for i := len(dirs) - 1; i >= 0; i-- {
+		os.Remove(dirs[i]) // only succeeds if empty
+	}
 }
 
 func runRm(cmd *cobra.Command, args []string) error {
@@ -279,7 +808,8 @@ func runRm(cmd *cobra.Command, args []string) error {
 			for scanner.Scan() {
 				line := strings.TrimSpace(scanner.Text())
 				if line != "" {
-					if strings.Contains(line, urlToRemove) {
+					entry := parseCodyLine(line)
+					if strings.Contains(entry.url, urlToRemove) {
 						matchedLines = append(matchedLines, line)
 						found = true
 					} else {
@@ -366,6 +896,8 @@ func resolveCodyWorkspaceUrl(entry codyEntry, pathTmpl *template.Template) strin
 type codyEntry struct {
 	url      string
 	codePath string // filename without .code extension, e.g. "personal", "uncategorized"
+	aliases  []string
+	tags     []string
 }
 
 type codyConfig struct {
@@ -486,7 +1018,9 @@ func collectAllCodyEntries() ([]codyEntry, error) {
 			for scanner.Scan() {
 				line := strings.TrimSpace(scanner.Text())
 				if line != "" {
-					entries = append(entries, codyEntry{url: line, codePath: codePath})
+					entry := parseCodyLine(line)
+					entry.codePath = codePath
+					entries = append(entries, entry)
 				}
 			}
 
@@ -515,4 +1049,62 @@ func executeShellCommand(command string, args ...string) (string, string, error)
 	err := cmd.Run()
 
 	return stdout.String(), stderr.String(), err
+}
+
+// parseCodyLine parses an extended .code line: "url [alias=x,y] [tags=a,b]"
+func parseCodyLine(line string) codyEntry {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return codyEntry{}
+	}
+
+	entry := codyEntry{url: fields[0]}
+
+	for _, field := range fields[1:] {
+		parts := strings.SplitN(field, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key, val := parts[0], parts[1]
+		values := strings.Split(val, ",")
+		switch key {
+		case "alias":
+			entry.aliases = values
+		case "tags":
+			entry.tags = values
+		}
+	}
+
+	return entry
+}
+
+// formatCodyLine serializes a codyEntry back to the .code line format
+func formatCodyLine(entry codyEntry) string {
+	parts := []string{entry.url}
+	if len(entry.aliases) > 0 {
+		parts = append(parts, "alias="+strings.Join(entry.aliases, ","))
+	}
+	if len(entry.tags) > 0 {
+		parts = append(parts, "tags="+strings.Join(entry.tags, ","))
+	}
+	return strings.Join(parts, " ")
+}
+
+// entryMatches returns true if the pattern matches the entry's URL (substring),
+// aliases (exact), or tags (exact).
+func entryMatches(entry codyEntry, pattern string) bool {
+	if strings.Contains(entry.url, pattern) {
+		return true
+	}
+	for _, alias := range entry.aliases {
+		if alias == pattern {
+			return true
+		}
+	}
+	for _, tag := range entry.tags {
+		if tag == pattern {
+			return true
+		}
+	}
+	return false
 }

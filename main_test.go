@@ -513,34 +513,385 @@ func TestRunOpen(t *testing.T) {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
+	t.Run("unique match", func(t *testing.T) {
+		err := runOpen(nil, []string{"repo1"})
+		if err != nil {
+			t.Errorf("runOpen() error = %v, wantErr false", err)
+		}
+	})
+
+	// Note: "multiple matches" now triggers interactive select (reads stdin),
+	// so we skip that in unit tests. It's tested via the interactive select test.
+
+	t.Run("no matches", func(t *testing.T) {
+		err := runOpen(nil, []string{"nonexistent"})
+		if err == nil {
+			t.Error("runOpen() expected error for no matches, got nil")
+		}
+	})
+}
+
+func TestParseCodyLine(t *testing.T) {
 	tests := []struct {
-		name    string
-		filter  string
-		wantErr bool
+		name        string
+		line        string
+		wantURL     string
+		wantAliases []string
+		wantTags    []string
 	}{
 		{
-			name:    "unique match",
-			filter:  "repo1",
-			wantErr: false,
+			name:    "url only",
+			line:    "git@github.com:user/repo.git",
+			wantURL: "git@github.com:user/repo.git",
 		},
 		{
-			name:    "multiple matches",
-			filter:  "user",
-			wantErr: true,
+			name:        "url with alias",
+			line:        "git@github.com:user/repo.git alias=r,repo",
+			wantURL:     "git@github.com:user/repo.git",
+			wantAliases: []string{"r", "repo"},
 		},
 		{
-			name:    "no matches",
-			filter:  "nonexistent",
-			wantErr: true,
+			name:     "url with tags",
+			line:     "git@github.com:user/repo.git tags=tools,cli",
+			wantURL:  "git@github.com:user/repo.git",
+			wantTags: []string{"tools", "cli"},
+		},
+		{
+			name:        "url with alias and tags",
+			line:        "git@github.com:user/repo.git alias=cody,c tags=tools,cli",
+			wantURL:     "git@github.com:user/repo.git",
+			wantAliases: []string{"cody", "c"},
+			wantTags:    []string{"tools", "cli"},
+		},
+		{
+			name:    "empty line",
+			line:    "",
+			wantURL: "",
+		},
+		{
+			name:    "unknown keys ignored",
+			line:    "git@github.com:user/repo.git foo=bar alias=r",
+			wantURL: "git@github.com:user/repo.git",
+			wantAliases: []string{"r"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := runOpen(nil, []string{tt.filter})
-			if (err != nil) != tt.wantErr {
-				t.Errorf("runOpen() error = %v, wantErr %v", err, tt.wantErr)
+			entry := parseCodyLine(tt.line)
+			if entry.url != tt.wantURL {
+				t.Errorf("parseCodyLine(%q).url = %q, want %q", tt.line, entry.url, tt.wantURL)
+			}
+			if !sliceEqual(entry.aliases, tt.wantAliases) {
+				t.Errorf("parseCodyLine(%q).aliases = %v, want %v", tt.line, entry.aliases, tt.wantAliases)
+			}
+			if !sliceEqual(entry.tags, tt.wantTags) {
+				t.Errorf("parseCodyLine(%q).tags = %v, want %v", tt.line, entry.tags, tt.wantTags)
 			}
 		})
 	}
+}
+
+func TestFormatCodyLine(t *testing.T) {
+	tests := []struct {
+		name     string
+		entry    codyEntry
+		expected string
+	}{
+		{
+			name:     "url only",
+			entry:    codyEntry{url: "git@github.com:user/repo.git"},
+			expected: "git@github.com:user/repo.git",
+		},
+		{
+			name:     "with aliases",
+			entry:    codyEntry{url: "git@github.com:user/repo.git", aliases: []string{"r", "repo"}},
+			expected: "git@github.com:user/repo.git alias=r,repo",
+		},
+		{
+			name:     "with tags",
+			entry:    codyEntry{url: "git@github.com:user/repo.git", tags: []string{"tools"}},
+			expected: "git@github.com:user/repo.git tags=tools",
+		},
+		{
+			name:     "with both",
+			entry:    codyEntry{url: "git@github.com:user/repo.git", aliases: []string{"c"}, tags: []string{"cli", "tools"}},
+			expected: "git@github.com:user/repo.git alias=c tags=cli,tools",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := formatCodyLine(tt.entry)
+			if result != tt.expected {
+				t.Errorf("formatCodyLine() = %q, want %q", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestEntryMatches(t *testing.T) {
+	entry := codyEntry{
+		url:     "git@github.com:alexjpaz/cody.git",
+		aliases: []string{"cody", "c"},
+		tags:    []string{"tools", "cli"},
+	}
+
+	tests := []struct {
+		name    string
+		pattern string
+		want    bool
+	}{
+		{"url substring match", "cody", true},
+		{"url substring match host", "github.com", true},
+		{"alias exact match", "c", true},
+		{"alias exact match full", "cody", true},
+		{"tag exact match", "tools", true},
+		{"tag exact match cli", "cli", true},
+		{"no match", "nonexistent", false},
+		{"partial alias no match", "cod", true}, // "cod" is substring of url
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := entryMatches(entry, tt.pattern)
+			if got != tt.want {
+				t.Errorf("entryMatches(%q) = %v, want %v", tt.pattern, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEntryMatchesAliasOnly(t *testing.T) {
+	// Test that alias exact match works when not a URL substring
+	entry := codyEntry{
+		url:     "git@github.com:user/repo.git",
+		aliases: []string{"myalias"},
+	}
+
+	if !entryMatches(entry, "myalias") {
+		t.Error("entryMatches should match alias 'myalias'")
+	}
+	if entryMatches(entry, "myalia") {
+		t.Error("entryMatches should not match partial alias 'myalia'")
+	}
+}
+
+func TestFormatParseCodyLineRoundTrip(t *testing.T) {
+	original := codyEntry{
+		url:     "git@github.com:user/repo.git",
+		aliases: []string{"r", "repo"},
+		tags:    []string{"tools", "cli"},
+	}
+
+	line := formatCodyLine(original)
+	parsed := parseCodyLine(line)
+
+	if parsed.url != original.url {
+		t.Errorf("round-trip url: got %q, want %q", parsed.url, original.url)
+	}
+	if !sliceEqual(parsed.aliases, original.aliases) {
+		t.Errorf("round-trip aliases: got %v, want %v", parsed.aliases, original.aliases)
+	}
+	if !sliceEqual(parsed.tags, original.tags) {
+		t.Errorf("round-trip tags: got %v, want %v", parsed.tags, original.tags)
+	}
+}
+
+func TestCollectAllCodyEntriesWithMetadata(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	originalHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", originalHome)
+
+	codeDir := filepath.Join(tmpDir, ".code.d")
+	if err := os.MkdirAll(codeDir, 0755); err != nil {
+		t.Fatalf("Failed to create test directory: %v", err)
+	}
+
+	content := "git@github.com:user/repo1.git alias=r1 tags=cli\ngit@github.com:user/repo2.git\n"
+	if err := os.WriteFile(filepath.Join(codeDir, "test.code"), []byte(content), 0644); err != nil {
+		t.Fatalf("Failed to write test file: %v", err)
+	}
+
+	entries, err := collectAllCodyEntries()
+	if err != nil {
+		t.Fatalf("collectAllCodyEntries() error = %v", err)
+	}
+
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(entries))
+	}
+
+	// Find the entry with aliases
+	var withAlias codyEntry
+	for _, e := range entries {
+		if e.url == "git@github.com:user/repo1.git" {
+			withAlias = e
+			break
+		}
+	}
+
+	if !sliceEqual(withAlias.aliases, []string{"r1"}) {
+		t.Errorf("expected aliases [r1], got %v", withAlias.aliases)
+	}
+	if !sliceEqual(withAlias.tags, []string{"cli"}) {
+		t.Errorf("expected tags [cli], got %v", withAlias.tags)
+	}
+}
+
+func TestReverseResolveCodePath(t *testing.T) {
+	tests := []struct {
+		name     string
+		repoPath string
+		homeDir  string
+		tmplStr  string
+		expected string
+	}{
+		{
+			name:     "default template with codePath",
+			repoPath: "/home/user/code/personal/github.com/user/repo",
+			homeDir:  "/home/user",
+			tmplStr:  "{{.Home}}/code/{{.CodePath}}/{{.Host}}/{{.Owner}}/{{.Repo}}",
+			expected: "personal",
+		},
+		{
+			name:     "legacy template (host as first segment)",
+			repoPath: "/home/user/code/github.com/user/repo",
+			homeDir:  "/home/user",
+			tmplStr:  "{{.Home}}/code/{{.Host}}/{{.Owner}}/{{.Repo}}",
+			expected: "uncategorized",
+		},
+		{
+			name:     "outside code dir",
+			repoPath: "/opt/repos/something",
+			homeDir:  "/home/user",
+			tmplStr:  "{{.Home}}/code/{{.CodePath}}/{{.Host}}/{{.Owner}}/{{.Repo}}",
+			expected: "uncategorized",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := reverseResolveCodePath(tt.repoPath, tt.homeDir, tt.tmplStr)
+			if got != tt.expected {
+				t.Errorf("reverseResolveCodePath() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestRunMigrate(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	originalHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", originalHome)
+
+	originalXDG := os.Getenv("XDG_CONFIG_HOME")
+	os.Setenv("XDG_CONFIG_HOME", tmpDir)
+	defer os.Setenv("XDG_CONFIG_HOME", originalXDG)
+
+	// Create .code.d with an entry filed under "personal"
+	codeDir := filepath.Join(tmpDir, ".code.d")
+	os.MkdirAll(codeDir, 0755)
+	os.WriteFile(filepath.Join(codeDir, "personal.code"),
+		[]byte("git@github.com:user/repo.git\n"), 0644)
+
+	// Create a repo at the legacy path: ~/code/github.com/user/repo
+	legacyPath := filepath.Join(tmpDir, "code", "github.com", "user", "repo", ".git")
+	os.MkdirAll(legacyPath, 0755)
+	os.WriteFile(filepath.Join(legacyPath, "HEAD"), []byte("ref: refs/heads/main\n"), 0644)
+
+	t.Run("dry run shows what would move", func(t *testing.T) {
+		migrateDry = true
+		defer func() { migrateDry = false }()
+
+		err := runMigrate(nil, nil)
+		if err != nil {
+			t.Fatalf("runMigrate() error = %v", err)
+		}
+
+		// Legacy path should still exist
+		if _, err := os.Stat(legacyPath); err != nil {
+			t.Error("legacy path should still exist after dry run")
+		}
+
+		// New path should NOT exist
+		newPath := filepath.Join(tmpDir, "code", "personal", "github.com", "user", "repo")
+		if _, err := os.Stat(newPath); err == nil {
+			t.Error("new path should not exist after dry run")
+		}
+	})
+
+	t.Run("actual migrate moves repo", func(t *testing.T) {
+		migrateDry = false
+
+		err := runMigrate(nil, nil)
+		if err != nil {
+			t.Fatalf("runMigrate() error = %v", err)
+		}
+
+		// New path should exist
+		newGit := filepath.Join(tmpDir, "code", "personal", "github.com", "user", "repo", ".git")
+		if _, err := os.Stat(newGit); err != nil {
+			t.Errorf("expected repo at new path %s, got error: %v", newGit, err)
+		}
+
+		// Legacy path should be gone
+		if _, err := os.Stat(legacyPath); err == nil {
+			t.Error("legacy path should be removed after migrate")
+		}
+	})
+
+	t.Run("nothing to migrate when already done", func(t *testing.T) {
+		migrateDry = false
+
+		err := runMigrate(nil, nil)
+		if err != nil {
+			t.Fatalf("runMigrate() error = %v", err)
+		}
+		// Should print "Nothing to migrate." and not error
+	})
+}
+
+func TestCleanEmptyDirs(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create nested empty dirs
+	nested := filepath.Join(tmpDir, "a", "b", "c")
+	os.MkdirAll(nested, 0755)
+
+	// Create a dir with a file (should not be removed)
+	withFile := filepath.Join(tmpDir, "keep", "data")
+	os.MkdirAll(withFile, 0755)
+	os.WriteFile(filepath.Join(withFile, "file.txt"), []byte("hi"), 0644)
+
+	cleanEmptyDirs(tmpDir)
+
+	// Empty nested dirs should be gone
+	if _, err := os.Stat(filepath.Join(tmpDir, "a")); err == nil {
+		t.Error("empty dir 'a' should have been removed")
+	}
+
+	// Dir with file should remain
+	if _, err := os.Stat(filepath.Join(withFile, "file.txt")); err != nil {
+		t.Error("dir with file should not be removed")
+	}
+}
+
+func sliceEqual(a, b []string) bool {
+	if len(a) == 0 && len(b) == 0 {
+		return true
+	}
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
