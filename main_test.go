@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"text/template"
 )
 
 func TestResolveCodyConfig(t *testing.T) {
@@ -40,11 +41,22 @@ func TestResolveCodyConfig(t *testing.T) {
 	}
 }
 
+func defaultPathTemplate(t *testing.T) *template.Template {
+	t.Helper()
+	tmpl, err := template.New("path").Parse(pathShorthands["default"])
+	if err != nil {
+		t.Fatalf("Failed to parse default template: %v", err)
+	}
+	return tmpl
+}
+
 func TestResolveCodyWorkspaceUrl(t *testing.T) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		t.Fatalf("Failed to get home directory: %v", err)
 	}
+
+	tmpl := defaultPathTemplate(t)
 
 	tests := []struct {
 		name     string
@@ -70,9 +82,237 @@ func TestResolveCodyWorkspaceUrl(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := resolveCodyWorkspaceUrl(tt.entry)
+			result := resolveCodyWorkspaceUrl(tt.entry, tmpl)
 			if result != tt.expected {
 				t.Errorf("resolveCodyWorkspaceUrl(%v) = %q, want %q", tt.entry, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestResolveCodyWorkspaceUrlLegacy(t *testing.T) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("Failed to get home directory: %v", err)
+	}
+
+	tmpl, err := template.New("path").Parse(pathShorthands["legacy"])
+	if err != nil {
+		t.Fatalf("Failed to parse legacy template: %v", err)
+	}
+
+	entry := codyEntry{url: "git@github.com:user/repo.git", codePath: "personal"}
+	expected := filepath.Join(homeDir, "code", "github.com", "user", "repo")
+
+	result := resolveCodyWorkspaceUrl(entry, tmpl)
+	if result != expected {
+		t.Errorf("resolveCodyWorkspaceUrl (legacy) = %q, want %q", result, expected)
+	}
+}
+
+func TestResolveCodyWorkspaceUrlCustomTemplate(t *testing.T) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("Failed to get home directory: %v", err)
+	}
+
+	tmpl, err := template.New("path").Parse("{{.Home}}/src/{{.Host}}/{{.Repo}}")
+	if err != nil {
+		t.Fatalf("Failed to parse custom template: %v", err)
+	}
+
+	entry := codyEntry{url: "git@github.com:user/repo.git", codePath: "personal"}
+	expected := filepath.Join(homeDir, "src", "github.com", "repo")
+
+	result := resolveCodyWorkspaceUrl(entry, tmpl)
+	if result != expected {
+		t.Errorf("resolveCodyWorkspaceUrl (custom) = %q, want %q", result, expected)
+	}
+}
+
+func TestParseGitURL(t *testing.T) {
+	tests := []struct {
+		name      string
+		url       string
+		wantHost  string
+		wantOwner string
+		wantRepo  string
+		wantOk    bool
+	}{
+		{
+			name:      "standard SSH URL with .git",
+			url:       "git@github.com:user/repo.git",
+			wantHost:  "github.com",
+			wantOwner: "user",
+			wantRepo:  "repo",
+			wantOk:    true,
+		},
+		{
+			name:      "SSH URL without .git",
+			url:       "git@gitlab.com:group/project",
+			wantHost:  "gitlab.com",
+			wantOwner: "group",
+			wantRepo:  "project",
+			wantOk:    true,
+		},
+		{
+			name:   "HTTPS URL",
+			url:    "https://github.com/user/repo",
+			wantOk: false,
+		},
+		{
+			name:   "empty string",
+			url:    "",
+			wantOk: false,
+		},
+		{
+			name:   "git@ but no colon",
+			url:    "git@github.com/user/repo",
+			wantOk: false,
+		},
+		{
+			name:   "git@ with colon but no slash",
+			url:    "git@github.com:repo",
+			wantOk: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			host, owner, repo, ok := parseGitURL(tt.url)
+			if ok != tt.wantOk {
+				t.Errorf("parseGitURL(%q) ok = %v, want %v", tt.url, ok, tt.wantOk)
+				return
+			}
+			if !ok {
+				return
+			}
+			if host != tt.wantHost {
+				t.Errorf("parseGitURL(%q) host = %q, want %q", tt.url, host, tt.wantHost)
+			}
+			if owner != tt.wantOwner {
+				t.Errorf("parseGitURL(%q) owner = %q, want %q", tt.url, owner, tt.wantOwner)
+			}
+			if repo != tt.wantRepo {
+				t.Errorf("parseGitURL(%q) repo = %q, want %q", tt.url, repo, tt.wantRepo)
+			}
+		})
+	}
+}
+
+func TestResolveConfigDir(t *testing.T) {
+	t.Run("uses XDG_CONFIG_HOME when set", func(t *testing.T) {
+		original := os.Getenv("XDG_CONFIG_HOME")
+		os.Setenv("XDG_CONFIG_HOME", "/tmp/xdg-test")
+		defer os.Setenv("XDG_CONFIG_HOME", original)
+
+		result := resolveConfigDir()
+		expected := "/tmp/xdg-test/cody"
+		if result != expected {
+			t.Errorf("resolveConfigDir() = %q, want %q", result, expected)
+		}
+	})
+
+	t.Run("falls back to ~/.config/cody", func(t *testing.T) {
+		original := os.Getenv("XDG_CONFIG_HOME")
+		os.Unsetenv("XDG_CONFIG_HOME")
+		defer os.Setenv("XDG_CONFIG_HOME", original)
+
+		homeDir, _ := os.UserHomeDir()
+		expected := filepath.Join(homeDir, ".config", "cody")
+
+		result := resolveConfigDir()
+		if result != expected {
+			t.Errorf("resolveConfigDir() = %q, want %q", result, expected)
+		}
+	})
+}
+
+func TestLoadConfig(t *testing.T) {
+	t.Run("no config file returns zero value", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		original := os.Getenv("XDG_CONFIG_HOME")
+		os.Setenv("XDG_CONFIG_HOME", tmpDir)
+		defer os.Setenv("XDG_CONFIG_HOME", original)
+
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatalf("loadConfig() error = %v", err)
+		}
+		if cfg.Path != "" {
+			t.Errorf("loadConfig() Path = %q, want empty", cfg.Path)
+		}
+	})
+
+	t.Run("reads path from config file", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		configDir := filepath.Join(tmpDir, "cody")
+		os.MkdirAll(configDir, 0755)
+		os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("path: legacy\n"), 0644)
+
+		original := os.Getenv("XDG_CONFIG_HOME")
+		os.Setenv("XDG_CONFIG_HOME", tmpDir)
+		defer os.Setenv("XDG_CONFIG_HOME", original)
+
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatalf("loadConfig() error = %v", err)
+		}
+		if cfg.Path != "legacy" {
+			t.Errorf("loadConfig() Path = %q, want %q", cfg.Path, "legacy")
+		}
+	})
+
+	t.Run("returns error for invalid YAML", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		configDir := filepath.Join(tmpDir, "cody")
+		os.MkdirAll(configDir, 0755)
+		os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(":\n  :\n    - ]["), 0644)
+
+		original := os.Getenv("XDG_CONFIG_HOME")
+		os.Setenv("XDG_CONFIG_HOME", tmpDir)
+		defer os.Setenv("XDG_CONFIG_HOME", original)
+
+		_, err := loadConfig()
+		if err == nil {
+			t.Error("loadConfig() expected error for invalid YAML, got nil")
+		}
+	})
+}
+
+func TestResolvePathTemplate(t *testing.T) {
+	tests := []struct {
+		name     string
+		cfg      codyConfig
+		expected string
+	}{
+		{
+			name:     "empty path returns default",
+			cfg:      codyConfig{},
+			expected: pathShorthands["default"],
+		},
+		{
+			name:     "explicit default",
+			cfg:      codyConfig{Path: "default"},
+			expected: pathShorthands["default"],
+		},
+		{
+			name:     "legacy shorthand",
+			cfg:      codyConfig{Path: "legacy"},
+			expected: pathShorthands["legacy"],
+		},
+		{
+			name:     "custom template passthrough",
+			cfg:      codyConfig{Path: "{{.Home}}/src/{{.Host}}/{{.Repo}}"},
+			expected: "{{.Home}}/src/{{.Host}}/{{.Repo}}",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := resolvePathTemplate(tt.cfg)
+			if result != tt.expected {
+				t.Errorf("resolvePathTemplate() = %q, want %q", result, tt.expected)
 			}
 		})
 	}
@@ -199,6 +439,11 @@ func TestRunSearch(t *testing.T) {
 	os.Setenv("HOME", tmpDir)
 	defer os.Setenv("HOME", originalHome)
 
+	// Point XDG_CONFIG_HOME to tmpDir so no config file is found
+	originalXDG := os.Getenv("XDG_CONFIG_HOME")
+	os.Setenv("XDG_CONFIG_HOME", tmpDir)
+	defer os.Setenv("XDG_CONFIG_HOME", originalXDG)
+
 	codeDir := filepath.Join(tmpDir, ".code.d")
 	if err := os.MkdirAll(codeDir, 0755); err != nil {
 		t.Fatalf("Failed to create test directory: %v", err)
@@ -250,6 +495,11 @@ func TestRunOpen(t *testing.T) {
 	originalHome := os.Getenv("HOME")
 	os.Setenv("HOME", tmpDir)
 	defer os.Setenv("HOME", originalHome)
+
+	// Point XDG_CONFIG_HOME to tmpDir so no config file is found
+	originalXDG := os.Getenv("XDG_CONFIG_HOME")
+	os.Setenv("XDG_CONFIG_HOME", tmpDir)
+	defer os.Setenv("XDG_CONFIG_HOME", originalXDG)
 
 	codeDir := filepath.Join(tmpDir, ".code.d")
 	if err := os.MkdirAll(codeDir, 0755); err != nil {

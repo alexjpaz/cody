@@ -8,8 +8,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"text/template"
 
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 )
 
 var rootCmd = &cobra.Command{
@@ -91,6 +93,11 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		pattern = args[0]
 	}
 
+	pathTmpl, err := loadPathTemplate()
+	if err != nil {
+		return fmt.Errorf("failed to load path template: %w", err)
+	}
+
 	entries, err := collectAllCodyEntries()
 	if err != nil {
 		return fmt.Errorf("failed to collect cody entries %w", err)
@@ -98,7 +105,7 @@ func runSearch(cmd *cobra.Command, args []string) error {
 
 	for _, entry := range entries {
 		if pattern == "" || strings.Contains(entry.url, pattern) {
-			dest := resolveCodyWorkspaceUrl(entry)
+			dest := resolveCodyWorkspaceUrl(entry, pathTmpl)
 			if dest != "" {
 				fmt.Println(dest)
 			} else {
@@ -118,6 +125,10 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	var filePath = resolveCodyConfig(codePath + ".code")
+
+	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+		return fmt.Errorf("failed to create directory %s: %w", filepath.Dir(filePath), err)
+	}
 
 	// Check if entry already exists
 	if _, err := os.Stat(filePath); err == nil {
@@ -159,10 +170,15 @@ const (
 )
 
 func runPull(cmd *cobra.Command, args []string) error {
+	pathTmpl, err := loadPathTemplate()
+	if err != nil {
+		return fmt.Errorf("failed to load path template: %w", err)
+	}
+
 	entries, _ := collectAllCodyEntries()
 
 	for _, entry := range entries {
-		dest := resolveCodyWorkspaceUrl(entry)
+		dest := resolveCodyWorkspaceUrl(entry, pathTmpl)
 
 		if dest == "" {
 			fmt.Printf("%sSkipped (unsupported URL format): %s%s\n", colorGray, entry.url, colorReset)
@@ -189,6 +205,12 @@ func runPull(cmd *cobra.Command, args []string) error {
 
 func runOpen(cmd *cobra.Command, args []string) error {
 	filter := args[0]
+
+	pathTmpl, err := loadPathTemplate()
+	if err != nil {
+		return fmt.Errorf("failed to load path template: %w", err)
+	}
+
 	entries, _ := collectAllCodyEntries()
 
 	// find all matching entries
@@ -209,7 +231,7 @@ func runOpen(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no matches found for filter '%s'", filter)
 	}
 
-	dest := resolveCodyWorkspaceUrl(matches[0])
+	dest := resolveCodyWorkspaceUrl(matches[0], pathTmpl)
 	fmt.Printf("cd %s\n", dest)
 
 	return nil
@@ -234,6 +256,11 @@ func runRm(cmd *cobra.Command, args []string) error {
 
 	codeDir := filepath.Join(homeDir, ".code.d")
 	found := false
+
+	if _, statErr := os.Stat(codeDir); os.IsNotExist(statErr) {
+		fmt.Printf("Entry not found: %s\n", urlToRemove)
+		return nil
+	}
 
 	err = filepath.Walk(codeDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -309,28 +336,121 @@ func resolveCodyConfig(path string) string {
 
 }
 
-func resolveCodyWorkspaceUrl(entry codyEntry) string {
+func resolveCodyWorkspaceUrl(entry codyEntry, pathTmpl *template.Template) string {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
 
-	if strings.HasPrefix(entry.url, "git@") {
-		parts := strings.SplitN(entry.url, ":", 2)
-		if len(parts) == 2 {
-			domain := strings.TrimPrefix(parts[0], "git@")
-			path := parts[1]
-			target := filepath.Join(homeDir, "code", entry.codePath, domain, strings.TrimSuffix(path, ".git"))
-			return target
-		}
+	host, owner, repo, ok := parseGitURL(entry.url)
+	if !ok {
+		return ""
 	}
 
-	return ""
+	data := pathTemplateData{
+		Home:     homeDir,
+		Host:     host,
+		Owner:    owner,
+		Repo:     repo,
+		CodePath: entry.codePath,
+	}
+
+	var buf strings.Builder
+	if err := pathTmpl.Execute(&buf, data); err != nil {
+		return ""
+	}
+
+	return filepath.Clean(buf.String())
 }
 
 type codyEntry struct {
 	url      string
 	codePath string // filename without .code extension, e.g. "personal", "uncategorized"
+}
+
+type codyConfig struct {
+	Path string `yaml:"path"`
+}
+
+type pathTemplateData struct {
+	Home     string
+	Host     string
+	Owner    string
+	Repo     string
+	CodePath string
+}
+
+var pathShorthands = map[string]string{
+	"default": "{{.Home}}/code/{{.CodePath}}/{{.Host}}/{{.Owner}}/{{.Repo}}",
+	"legacy":  "{{.Home}}/code/{{.Host}}/{{.Owner}}/{{.Repo}}",
+}
+
+func resolveConfigDir() string {
+	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
+		return filepath.Join(dir, "cody")
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(homeDir, ".config", "cody")
+}
+
+func loadConfig() (codyConfig, error) {
+	configDir := resolveConfigDir()
+	if configDir == "" {
+		return codyConfig{}, nil
+	}
+	data, err := os.ReadFile(filepath.Join(configDir, "config.yaml"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return codyConfig{}, nil
+		}
+		return codyConfig{}, err
+	}
+	var cfg codyConfig
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return codyConfig{}, fmt.Errorf("failed to parse config.yaml: %w", err)
+	}
+	return cfg, nil
+}
+
+func resolvePathTemplate(cfg codyConfig) string {
+	if cfg.Path == "" || cfg.Path == "default" {
+		return pathShorthands["default"]
+	}
+	if tmpl, ok := pathShorthands[cfg.Path]; ok {
+		return tmpl
+	}
+	return cfg.Path
+}
+
+func loadPathTemplate() (*template.Template, error) {
+	cfg, err := loadConfig()
+	if err != nil {
+		return nil, err
+	}
+	tmplStr := resolvePathTemplate(cfg)
+	return template.New("path").Parse(tmplStr)
+}
+
+func parseGitURL(url string) (host, owner, repo string, ok bool) {
+	if !strings.HasPrefix(url, "git@") {
+		return "", "", "", false
+	}
+	parts := strings.SplitN(url, ":", 2)
+	if len(parts) != 2 {
+		return "", "", "", false
+	}
+	host = strings.TrimPrefix(parts[0], "git@")
+	path := strings.TrimSuffix(parts[1], ".git")
+	pathParts := strings.SplitN(path, "/", 2)
+	if len(pathParts) != 2 {
+		return "", "", "", false
+	}
+	owner = pathParts[0]
+	repo = pathParts[1]
+	return host, owner, repo, true
 }
 
 func collectAllCodyEntries() ([]codyEntry, error) {
@@ -342,6 +462,10 @@ func collectAllCodyEntries() ([]codyEntry, error) {
 	}
 
 	codeDir := filepath.Join(homeDir, ".code.d")
+
+	if _, err := os.Stat(codeDir); os.IsNotExist(err) {
+		return entries, nil
+	}
 
 	err = filepath.Walk(codeDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
