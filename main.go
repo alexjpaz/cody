@@ -58,6 +58,13 @@ var rmCmd = &cobra.Command{
 	RunE:  runRm,
 }
 
+var shellIntegrationCmd = &cobra.Command{
+	Use:   "shell-integration",
+	Short: "Print shell integration snippet",
+	Long:  "Print shell function and alias for easy directory navigation. Add 'eval $(cody shell-integration)' to your shell profile.",
+	Run:   runShellIntegration,
+}
+
 var rmForce bool
 
 func init() {
@@ -66,6 +73,7 @@ func init() {
 	rootCmd.AddCommand(pullCmd)
 	rootCmd.AddCommand(openCmd)
 	rootCmd.AddCommand(rmCmd)
+	rootCmd.AddCommand(shellIntegrationCmd)
 
 	rmCmd.Flags().BoolVarP(&rmForce, "force", "f", false, "Remove without confirmation")
 }
@@ -83,20 +91,19 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		pattern = args[0]
 	}
 
-	lines, err := collectAllCodyEntries()
+	entries, err := collectAllCodyEntries()
 	if err != nil {
 		return fmt.Errorf("failed to collect cody entries %w", err)
 	}
 
-	if pattern != "" {
-		for _, line := range lines {
-			if strings.Contains(line, pattern) {
-				fmt.Println(line)
+	for _, entry := range entries {
+		if pattern == "" || strings.Contains(entry.url, pattern) {
+			dest := resolveCodyWorkspaceUrl(entry)
+			if dest != "" {
+				fmt.Println(dest)
+			} else {
+				fmt.Println(entry.url)
 			}
-		}
-	} else {
-		for _, line := range lines {
-			fmt.Println(line)
 		}
 	}
 
@@ -152,29 +159,28 @@ const (
 )
 
 func runPull(cmd *cobra.Command, args []string) error {
-	// filter := args[0]
-	urls, _ := collectAllCodyEntries()
+	entries, _ := collectAllCodyEntries()
 
-	for _, url := range urls {
-		dest := resolveCodyWorkspaceUrl(url)
+	for _, entry := range entries {
+		dest := resolveCodyWorkspaceUrl(entry)
 
 		if dest == "" {
-			fmt.Printf("%sSkipped (unsupported URL format): %s%s\n", colorGray, url, colorReset)
+			fmt.Printf("%sSkipped (unsupported URL format): %s%s\n", colorGray, entry.url, colorReset)
 			continue
 		}
 
 		// Check if .git directory exists (fast local check)
 		gitDir := filepath.Join(dest, ".git")
 		if info, err := os.Stat(gitDir); err == nil && info.IsDir() {
-			fmt.Printf("%sSkipped (already exists): %s%s\n", colorGray, url, colorReset)
+			fmt.Printf("%sSkipped (already exists): %s%s\n", colorGray, entry.url, colorReset)
 			continue
 		}
 
-		fmt.Printf("%sCloning: %s%s\n", colorBlue, url, colorReset)
-		if _, _, err := executeShellCommand("git", "clone", url, dest); err != nil {
-			fmt.Printf("%sClone failed: %s%s\n", colorRed, url, colorReset)
+		fmt.Printf("%sCloning: %s%s\n", colorBlue, entry.url, colorReset)
+		if _, _, err := executeShellCommand("git", "clone", entry.url, dest); err != nil {
+			fmt.Printf("%sClone failed: %s%s\n", colorRed, entry.url, colorReset)
 		} else {
-			fmt.Printf("%sClone success: %s to %s%s\n", colorBlue, url, dest, colorReset)
+			fmt.Printf("%sClone success: %s to %s%s\n", colorBlue, entry.url, dest, colorReset)
 		}
 	}
 
@@ -183,18 +189,22 @@ func runPull(cmd *cobra.Command, args []string) error {
 
 func runOpen(cmd *cobra.Command, args []string) error {
 	filter := args[0]
-	urls, _ := collectAllCodyEntries()
+	entries, _ := collectAllCodyEntries()
 
-	// find all matching urls
-	var matches []string
-	for _, url := range urls {
-		if strings.Contains(url, filter) {
-			matches = append(matches, url)
+	// find all matching entries
+	var matches []codyEntry
+	for _, entry := range entries {
+		if strings.Contains(entry.url, filter) {
+			matches = append(matches, entry)
 		}
 	}
 
 	if len(matches) > 1 {
-		return fmt.Errorf("multiple matches found: \n%s", strings.Join(matches, "\n"))
+		urls := make([]string, len(matches))
+		for i, m := range matches {
+			urls[i] = m.url
+		}
+		return fmt.Errorf("multiple matches found: \n%s", strings.Join(urls, "\n"))
 	} else if len(matches) == 0 {
 		return fmt.Errorf("no matches found for filter '%s'", filter)
 	}
@@ -203,6 +213,15 @@ func runOpen(cmd *cobra.Command, args []string) error {
 	fmt.Printf("cd %s\n", dest)
 
 	return nil
+}
+
+func runShellIntegration(cmd *cobra.Command, args []string) {
+	fmt.Print(`function cody_cd() {
+    eval $(cody open $@)
+}
+
+alias c=cody_cd
+`)
 }
 
 func runRm(cmd *cobra.Command, args []string) error {
@@ -290,18 +309,18 @@ func resolveCodyConfig(path string) string {
 
 }
 
-func resolveCodyWorkspaceUrl(url string) string {
+func resolveCodyWorkspaceUrl(entry codyEntry) string {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
 
-	if strings.HasPrefix(url, "git@") {
-		parts := strings.SplitN(url, ":", 2)
+	if strings.HasPrefix(entry.url, "git@") {
+		parts := strings.SplitN(entry.url, ":", 2)
 		if len(parts) == 2 {
 			domain := strings.TrimPrefix(parts[0], "git@")
 			path := parts[1]
-			target := homeDir + "/code/" + domain + "/" + strings.TrimSuffix(path, ".git")
+			target := filepath.Join(homeDir, "code", entry.codePath, domain, strings.TrimSuffix(path, ".git"))
 			return target
 		}
 	}
@@ -309,8 +328,13 @@ func resolveCodyWorkspaceUrl(url string) string {
 	return ""
 }
 
-func collectAllCodyEntries() ([]string, error) {
-	var entries []string
+type codyEntry struct {
+	url      string
+	codePath string // filename without .code extension, e.g. "personal", "uncategorized"
+}
+
+func collectAllCodyEntries() ([]codyEntry, error) {
+	var entries []codyEntry
 
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -326,6 +350,8 @@ func collectAllCodyEntries() ([]string, error) {
 
 		// Only process .code files
 		if !info.IsDir() && filepath.Ext(path) == ".code" {
+			codePath := strings.TrimSuffix(filepath.Base(path), ".code")
+
 			content, err := os.ReadFile(path)
 			if err != nil {
 				return fmt.Errorf("failed to read file %s: %w", path, err)
@@ -336,7 +362,7 @@ func collectAllCodyEntries() ([]string, error) {
 			for scanner.Scan() {
 				line := strings.TrimSpace(scanner.Text())
 				if line != "" {
-					entries = append(entries, line)
+					entries = append(entries, codyEntry{url: line, codePath: codePath})
 				}
 			}
 

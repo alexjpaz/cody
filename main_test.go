@@ -48,31 +48,31 @@ func TestResolveCodyWorkspaceUrl(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		url      string
+		entry    codyEntry
 		expected string
 	}{
 		{
 			name:     "git SSH URL with .git suffix",
-			url:      "git@github.com:user/repo.git",
-			expected: filepath.Join(homeDir, "code", "github.com", "user", "repo"),
+			entry:    codyEntry{url: "git@github.com:user/repo.git", codePath: "personal"},
+			expected: filepath.Join(homeDir, "code", "personal", "github.com", "user", "repo"),
 		},
 		{
 			name:     "git SSH URL without .git suffix",
-			url:      "git@gitlab.com:group/project",
-			expected: filepath.Join(homeDir, "code", "gitlab.com", "group", "project"),
+			entry:    codyEntry{url: "git@gitlab.com:group/project", codePath: "work"},
+			expected: filepath.Join(homeDir, "code", "work", "gitlab.com", "group", "project"),
 		},
 		{
 			name:     "non-git URL",
-			url:      "https://github.com/user/repo",
+			entry:    codyEntry{url: "https://github.com/user/repo", codePath: "test"},
 			expected: "",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := resolveCodyWorkspaceUrl(tt.url)
+			result := resolveCodyWorkspaceUrl(tt.entry)
 			if result != tt.expected {
-				t.Errorf("resolveCodyWorkspaceUrl(%q) = %q, want %q", tt.url, result, tt.expected)
+				t.Errorf("resolveCodyWorkspaceUrl(%v) = %q, want %q", tt.entry, result, tt.expected)
 			}
 		})
 	}
@@ -113,10 +113,10 @@ func TestCollectAllCodyEntries(t *testing.T) {
 		t.Fatalf("collectAllCodyEntries() error = %v", err)
 	}
 
-	expected := []string{
-		"git@github.com:user/repo1.git",
-		"git@github.com:user/repo2.git",
-		"git@gitlab.com:group/project.git",
+	expected := []codyEntry{
+		{url: "git@github.com:user/repo1.git", codePath: "test1"},
+		{url: "git@github.com:user/repo2.git", codePath: "test1"},
+		{url: "git@gitlab.com:group/project.git", codePath: "test2"},
 	}
 
 	if len(entries) != len(expected) {
@@ -126,13 +126,13 @@ func TestCollectAllCodyEntries(t *testing.T) {
 	for _, exp := range expected {
 		found := false
 		for _, entry := range entries {
-			if entry == exp {
+			if entry.url == exp.url && entry.codePath == exp.codePath {
 				found = true
 				break
 			}
 		}
 		if !found {
-			t.Errorf("Expected entry %q not found in results", exp)
+			t.Errorf("Expected entry %v not found in results", exp)
 		}
 	}
 }
