@@ -39,6 +39,15 @@ echo "Latest version: $LATEST"
 URL="https://github.com/${REPO}/releases/download/${LATEST}/${BINARY}"
 
 echo "Downloading $BINARY..."
+
+# Verify the binary exists for this platform
+HTTP_STATUS=$(curl -sL -o /dev/null -w "%{http_code}" "$URL")
+if [ "$HTTP_STATUS" != "200" ]; then
+    echo "Error: No release binary found for ${OS}/${ARCH} (${BINARY})"
+    echo "Available binaries can be found at: https://github.com/${REPO}/releases/tag/${LATEST}"
+    exit 1
+fi
+
 curl -sL "$URL" -o /tmp/cody
 
 # Make executable
